@@ -30,6 +30,13 @@ trait HasEvents
     protected $observables = [];
 
     /**
+     * Used to disable events for a model.
+     *
+     * @var array
+     */
+    protected static $modelDispatchers = [];
+
+    /**
      * Boot the has event trait for a model.
      *
      * @return void
@@ -179,10 +186,10 @@ trait HasEvents
      */
     protected static function registerModelEvent($event, $callback)
     {
-        if (isset(static::$dispatcher)) {
+        if (! is_null($dispatcher = static::getEventDispatcher())) {
             $name = static::class;
 
-            static::$dispatcher->listen("eloquent.{$event}: {$name}", $callback);
+            $dispatcher->listen("eloquent.{$event}: {$name}", $callback);
         }
     }
 
@@ -195,7 +202,7 @@ trait HasEvents
      */
     protected function fireModelEvent($event, $halt = true)
     {
-        if (! isset(static::$dispatcher)) {
+        if (is_null($dispatcher = static::getEventDispatcher())) {
             return true;
         }
 
@@ -212,7 +219,7 @@ trait HasEvents
             return false;
         }
 
-        return ! empty($result) ? $result : static::$dispatcher->{$method}(
+        return ! empty($result) ? $result : $dispatcher->{$method}(
             "eloquent.{$event}: ".static::class, $this
         );
     }
@@ -230,7 +237,8 @@ trait HasEvents
             return;
         }
 
-        $result = static::$dispatcher->$method(new $this->dispatchesEvents[$event]($this));
+        $result = static::getEventDispatcher()
+            ?->$method(new $this->dispatchesEvents[$event]($this));
 
         if (! is_null($result)) {
             return $result;
@@ -371,18 +379,18 @@ trait HasEvents
      */
     public static function flushEventListeners()
     {
-        if (! isset(static::$dispatcher)) {
+        if (is_null($dispatcher = static::getEventDispatcher())) {
             return;
         }
 
         $instance = new static;
 
         foreach ($instance->getObservableEvents() as $event) {
-            static::$dispatcher->forget("eloquent.{$event}: ".static::class);
+            $dispatcher->forget("eloquent.{$event}: ".static::class);
         }
 
         foreach (array_values($instance->dispatchesEvents) as $event) {
-            static::$dispatcher->forget($event);
+            $dispatcher->forget($event);
         }
     }
 
@@ -393,6 +401,10 @@ trait HasEvents
      */
     public static function getEventDispatcher()
     {
+        if (array_key_exists(static::class, static::$modelDispatchers)) {
+            return static::$modelDispatchers[static::class];
+        }
+
         return static::$dispatcher;
     }
 
@@ -400,10 +412,17 @@ trait HasEvents
      * Set the event dispatcher instance.
      *
      * @param  \Illuminate\Contracts\Events\Dispatcher  $dispatcher
+     * @param  bool  $global
      * @return void
      */
-    public static function setEventDispatcher(Dispatcher $dispatcher)
+    public static function setEventDispatcher(Dispatcher $dispatcher, bool $global = true)
     {
+        if (! $global) {
+            static::$modelDispatchers[static::class] = $dispatcher;
+
+            return;
+        }
+
         static::$dispatcher = $dispatcher;
     }
 
@@ -414,6 +433,7 @@ trait HasEvents
      */
     public static function unsetEventDispatcher()
     {
+        unset(static::$modelDispatchers[static::class]);
         static::$dispatcher = null;
     }
 
@@ -425,15 +445,28 @@ trait HasEvents
      */
     public static function withoutEvents(callable $callback)
     {
+        $modelDispatcher = static::$modelDispatchers[static::class] ?? null;
         $dispatcher = static::getEventDispatcher();
 
-        if ($dispatcher) {
-            static::setEventDispatcher(new NullDispatcher($dispatcher));
+        $underlyingDispatcher = $modelDispatcher ?? $dispatcher;
+
+        static::$modelDispatchers[static::class] = $underlyingDispatcher
+            ? new NullDispatcher($underlyingDispatcher)
+            : null;
+
+        if (! $modelDispatcher && $dispatcher) {
+            static::setEventDispatcher(static::getEventDispatcher());
         }
 
         try {
             return $callback();
         } finally {
+            if ($modelDispatcher) {
+                static::$modelDispatchers[static::class] = $modelDispatcher;
+            } else {
+                unset(static::$modelDispatchers[static::class]);
+            }
+
             if ($dispatcher) {
                 static::setEventDispatcher($dispatcher);
             }
